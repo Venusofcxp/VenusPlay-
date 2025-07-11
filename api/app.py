@@ -139,73 +139,64 @@ def info_serie():
 # === Temporadas e Episódios ===
 
 @app.route("/api/Venus/Temporadas")
-def listar_todas_as_temporadas():
-    resultados = []
+def listar_temporadas_da_serie():
+    id_serie = request.args.get("id")
+    if not id_serie:
+        return jsonify({"error": "Parâmetro 'id' da série é obrigatório."}), 400
+
     try:
-        # 1. Pega a lista de séries disponíveis
-        series = get_api_data("get_series")      # [{series_id, name, ...}, ...]
+        # Info da série (contém episodes)
+        r = requests.get(
+            f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
+            f"&action=get_series_info&series_id={id_serie}", timeout=10
+        )
+        data = r.json()
+        nome_serie = limpar_titulo(data.get("info", {}).get("name", ""))
+        episodes_dict = data.get("episodes", {})          # {"S01": [...], ...}
 
-        for s in series:
-            id_serie = s.get("series_id")
-            nome_serie = limpar_titulo(s.get("name", ""))
-
-            # 2. Pega as temporadas dessa série
-            r = requests.get(
-                f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
-                f"&action=get_series_info&series_id={id_serie}", timeout=10
-            )
-            episodes_dict = r.json().get("episodes", {})  # {"S01": [...], "S02": [...]}
-
-            for temporada_key in episodes_dict.keys():     # ex. "S01"
-                num_temp = temporada_key.replace("S", "").lstrip("0") or "0"
-                resultados.append({
-                    "ID": str(id_serie),
-                    "Temporada": num_temp,
-                    "Titulo": nome_serie
-                })
-
+        resultados = [
+            {
+                "ID": str(id_serie),
+                "Temporada": k.replace("S", "").lstrip("0") or "0",
+                "Titulo": nome_serie
+            }
+            for k in episodes_dict.keys()
+        ]
         return jsonify(resultados)
 
     except Exception as e:
         return jsonify({"error": f"Erro ao listar temporadas: {str(e)}"}), 500
 
 @app.route("/api/Venus/Episodios")
-def listar_todos_os_episodios():
-    resultados = []
+def listar_episodios_da_serie():
+    id_serie = request.args.get("id")
+    if not id_serie:
+        return jsonify({"error": "Parâmetro 'id' da série é obrigatório."}), 400
+
     try:
-        # 1. Pega todas as séries
-        series = get_api_data("get_series")
+        # Info da série
+        r = requests.get(
+            f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
+            f"&action=get_series_info&series_id={id_serie}", timeout=10
+        )
+        data = r.json()
+        nome_serie = limpar_titulo(data.get("info", {}).get("name", ""))
+        episodes_dict = data.get("episodes", {})          # {"S01": [...], ...}
 
-        for s in series:
-            id_serie = s.get("series_id")
-            nome_serie = limpar_titulo(s.get("name", ""))
-
-            # 2. Pega detalhes (inclui episódios)
-            r = requests.get(
-                f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
-                f"&action=get_series_info&series_id={id_serie}", timeout=10
-            )
-            data = r.json()
-            episodes_dict = data.get("episodes", {})       # {"S01": [...], ...}
-
-            for temp_key, episodios in episodes_dict.items():
-                num_temp = temp_key.replace("S", "").lstrip("0") or "0"
-
-                for ep in episodios:
-                    num_ep = ep.get("episode_num")
-                    titulo_bruto = ep.get("title") or ""
-                    titulo_formatado = (
-                        f"{nome_serie} - {temp_key}E{int(num_ep):02} - {titulo_bruto}"
-                    )
-
-                    resultados.append({
-                        "ID": str(id_serie),
-                        "Episodio": str(num_ep),
-                        "Titulo_EP": titulo_formatado,
-                        "Capa_EP": url_banner(ep.get("info", {}).get("backdrop_path")),
-                        "Play": ep.get("id"),
-                        "Temporada": num_temp
-                    })
+        resultados = []
+        for temp_key, episodios in episodes_dict.items():
+            num_temp = temp_key.replace("S", "").lstrip("0") or "0"
+            for ep in episodios:
+                num_ep = int(ep.get("episode_num"))
+                titulo_fmt = f"{nome_serie} - {temp_key}E{num_ep:02} - {ep.get('title')}"
+                resultados.append({
+                    "ID": str(id_serie),
+                    "Temporada": num_temp,
+                    "Episodio": str(num_ep),
+                    "Titulo_EP": titulo_fmt,
+                    "Capa_EP": url_banner(ep.get("info", {}).get("backdrop_path")),
+                    "Play": ep.get("id")
+                })
 
         return jsonify(resultados)
 
