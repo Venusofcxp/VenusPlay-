@@ -174,8 +174,19 @@ def get_episodios():
         return jsonify({"error": "ID e Temporada necessários"}), 400
 
     try:
-        r = requests.get(f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}")
-        episodes = r.json().get("episodes", {}).get(temporada, [])
+        r = requests.get(
+            f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}",
+            timeout=10
+        )
+        episodes_dict = r.json().get("episodes", {})
+        episodes = []
+
+        # Busca tolerante: compara ignorando zeros à esquerda
+        for key in episodes_dict.keys():
+            if key == temporada or key.lstrip("0") == temporada.lstrip("0"):
+                episodes = episodes_dict[key]
+                break
+
     except:
         return jsonify({"error": "Erro ao obter episódios"}), 500
 
