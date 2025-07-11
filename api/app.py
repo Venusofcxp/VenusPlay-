@@ -1,103 +1,108 @@
 from flask import Flask, jsonify, request
 import requests
 import re
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 
-API_BASE = "https://hiveos.space/player_api.php"
-USERNAME = "VenusPlay"
-PASSWORD = "659225573"
-PAGE_SIZE = 27
+# === CONFIGURAÇÃO GERAL ===
+API_BASE   = "https://hiveos.space/player_api.php"
+USERNAME   = "VenusPlay"
+PASSWORD   = "659225573"
+PAGE_SIZE  = 27
+TIMEOUT    = 10          # segundos para cada requisição à IPTV
+POOL_SIZE  = 100         # conexões simultâneas reutilizáveis
 
-# === Funções utilitárias ===
+# === SESSÃO HTTP COM POOL / RETRY ===
+session = requests.Session()
+adapter = HTTPAdapter(
+    pool_connections=POOL_SIZE,
+    pool_maxsize=POOL_SIZE,
+    max_retries=Retry(total=3, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
 
-def limpar_titulo(titulo):
+# === FUNÇÕES UTILITÁRIAS ===
+def limpar_titulo(titulo: str) -> str:
     if not titulo:
         return ""
     return re.sub(r"\s*\(\d{4}\)$", "", titulo.strip())
 
-def url_banner(path):
+def url_banner(path: str) -> str:
     if path and isinstance(path, str):
         if not path.startswith("http"):
             return f"https://image.tmdb.org/t/p/w1280{path}"
         return path
     return ""
 
-def url_capa(path):
+def url_capa(path: str) -> str:
     if path and isinstance(path, str):
         if not path.startswith("http"):
             return f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{path}"
         return path
     return ""
 
-def primeiro_genero(genero):
+def primeiro_genero(genero: str) -> str:
     if not genero:
         return ""
     return genero.split(",")[0].strip()
 
-def get_api_data(endpoint):
+def get_api_data(endpoint: str):
+    """GET simples a qualquer endpoint Xtream"""
     url = f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action={endpoint}"
     try:
-        response = requests.get(url, timeout=10)
-        return response.json()
+        resp = session.get(url, timeout=TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
         return {"error": str(e)}
 
-# === Paginados ===
-
-def clean_item(item, tipo):
+# === PAGINAÇÃO (FILMES / SÉRIES LISTAGEM GERAL) ===
+def clean_item(item: dict, tipo: str):
     return {
-        "ID": item.get("stream_id") or item.get("series_id"),
-        "Título": limpar_titulo(item.get("name")),
-        "Capa": url_capa(item.get("stream_icon") or item.get("cover")),
-        "Banner": url_banner(item.get("backdrop_path")),
-        "Ano": item.get("year") or "",
-        "Gênero": primeiro_genero(item.get("genre")),
-        "Tipo": tipo,
-        "Sinopse": item.get("plot", ""),  # às vezes vem no item
-        "Score": item.get("rating", ""),
-        "Player": item.get("stream_id") if tipo == "Filme" else None
+        "ID":      item.get("stream_id") or item.get("series_id"),
+        "Título":  limpar_titulo(item.get("name")),
+        "Capa":    url_capa(item.get("stream_icon") or item.get("cover")),
+        "Banner":  url_banner(item.get("backdrop_path")),
+        "Ano":     item.get("year") or "",
+        "Gênero":  primeiro_genero(item.get("genre")),
+        "Tipo":    tipo,
+        "Sinopse": item.get("plot", ""),
+        "Score":   item.get("rating", ""),
+        "Player":  item.get("stream_id") if tipo == "Filme" else None
     }
 
+# === ROTAS DE LISTAGEM (FILMES / SÉRIES) ===
 @app.route("/api/Venus/Filmes")
 def get_filmes():
-    page = int(request.args.get("page", 1))
-    data = get_api_data("get_vod_streams")
+    page  = max(int(request.args.get("page", "1")), 1)
+    data  = get_api_data("get_vod_streams")
     if "error" in data:
-        return jsonify(data), 500
-
+        return jsonify(data), 502
     filmes = [clean_item(i, "Filme") for i in data]
-    start = (page - 1) * PAGE_SIZE
-    end = start + PAGE_SIZE
-    return jsonify(filmes[start:end])
+    i0, i1 = (page-1)*PAGE_SIZE, page*PAGE_SIZE
+    return jsonify(filmes[i0:i1])
 
 @app.route("/api/Venus/Séries")
 def get_series():
-    page = int(request.args.get("page", 1))
-    data = get_api_data("get_series")
+    page  = max(int(request.args.get("page", "1")), 1)
+    data  = get_api_data("get_series")
     if "error" in data:
-        return jsonify(data), 500
-
+        return jsonify(data), 502
     series = [clean_item(i, "Série") for i in data]
-    start = (page - 1) * PAGE_SIZE
-    end = start + PAGE_SIZE
-    return jsonify(series[start:end])
+    i0, i1 = (page-1)*PAGE_SIZE, page*PAGE_SIZE
+    return jsonify(series[i0:i1])
 
-# === Info de Filmes/Séries ===
-
+# === INFO DE FILME / SÉRIE ===
 @app.route("/api/Info/Venus/Filmes")
 def info_filme():
     id_ = request.args.get("id")
     if not id_:
         return jsonify({"error": "ID necessário"}), 400
-
-    url = f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_vod_info&vod_id={id_}"
-    try:
-        r = requests.get(url, timeout=10)
-        info = r.json().get("info", {})
-    except:
-        return jsonify({"error": "Erro ao processar resposta"}), 500
-
+    data = get_api_data(f"get_vod_info&vod_id={id_}")
+    info = data.get("info", {})
     return jsonify({
         "ID": id_,
         "Título": limpar_titulo(info.get("title")),
@@ -116,14 +121,8 @@ def info_serie():
     id_ = request.args.get("id")
     if not id_:
         return jsonify({"error": "ID necessário"}), 400
-
-    url = f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}"
-    try:
-        r = requests.get(url, timeout=10)
-        info = r.json().get("info", {})
-    except:
-        return jsonify({"error": "Erro ao processar resposta"}), 500
-
+    data = get_api_data(f"get_series_info&series_id={id_}")
+    info = data.get("info", {})
     return jsonify({
         "ID": id_,
         "Título": limpar_titulo(info.get("name")),
@@ -136,98 +135,78 @@ def info_serie():
         "Score": info.get("rating") or ""
     })
 
-# === Temporadas e Episódios ===
+# === ROTAS POR SÉRIE (TEMPORADAS & EPISÓDIOS) ===
+def buscar_series_info(id_serie: str):
+    return get_api_data(f"get_series_info&series_id={id_serie}")
 
 @app.route("/api/Venus/Temporadas")
 def listar_temporadas_da_serie():
     id_serie = request.args.get("id")
     if not id_serie:
         return jsonify({"error": "Parâmetro 'id' da série é obrigatório."}), 400
-
-    try:
-        # Info da série (contém episodes)
-        r = requests.get(
-            f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
-            f"&action=get_series_info&series_id={id_serie}", timeout=10
-        )
-        data = r.json()
-        nome_serie = limpar_titulo(data.get("info", {}).get("name", ""))
-        episodes_dict = data.get("episodes", {})          # {"S01": [...], ...}
-
-        resultados = [
-            {
-                "ID": str(id_serie),
-                "Temporada": k.replace("S", "").lstrip("0") or "0",
-                "Titulo": nome_serie
-            }
-            for k in episodes_dict.keys()
-        ]
-        return jsonify(resultados)
-
-    except Exception as e:
-        return jsonify({"error": f"Erro ao listar temporadas: {str(e)}"}), 500
+    data = buscar_series_info(id_serie)
+    if "error" in data:
+        return jsonify(data), 502
+    nome_serie    = limpar_titulo(data.get("info", {}).get("name", ""))
+    episodes_dict = data.get("episodes", {})
+    resultados = [{
+        "ID": str(id_serie),
+        "Temporada": k.replace("S", "").lstrip("0") or "0",
+        "Titulo": nome_serie
+    } for k in episodes_dict.keys()]
+    return jsonify(resultados)
 
 @app.route("/api/Venus/Episodios")
 def listar_episodios_da_serie():
     id_serie = request.args.get("id")
     if not id_serie:
         return jsonify({"error": "Parâmetro 'id' da série é obrigatório."}), 400
+    data = buscar_series_info(id_serie)
+    if "error" in data:
+        return jsonify(data), 502
+    nome_serie    = limpar_titulo(data.get("info", {}).get("name", ""))
+    episodes_dict = data.get("episodes", {})
+    resultados = []
+    for temp_key, episodios in episodes_dict.items():
+        num_temp = temp_key.replace("S", "").lstrip("0") or "0"
+        for ep in episodios:
+            num_ep_raw = ep.get("episode_num") or "0"
+            try:
+                num_ep = int(num_ep_raw)
+            except ValueError:
+                num_ep = 0
+            info_ep  = ep.get("info", {})
+            banner   = url_banner(info_ep.get("backdrop_path") or info_ep.get("movie_image"))
+            titulo   = f"{nome_serie} - {temp_key}E{num_ep:02} - {ep.get('title')}"
+            resultados.append({
+                "ID": str(id_serie),
+                "Temporada": num_temp,
+                "Episodio": str(num_ep),
+                "Titulo_EP": titulo,
+                "Capa_EP": banner,
+                "Play": ep.get("id")
+            })
+    return jsonify(resultados)
 
-    try:
-        # Info da série
-        r = requests.get(
-            f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
-            f"&action=get_series_info&series_id={id_serie}", timeout=10
-        )
-        data = r.json()
-        nome_serie = limpar_titulo(data.get("info", {}).get("name", ""))
-        episodes_dict = data.get("episodes", {})          # {"S01": [...], ...}
-
-        resultados = []
-        for temp_key, episodios in episodes_dict.items():
-            num_temp = temp_key.replace("S", "").lstrip("0") or "0"
-            for ep in episodios:
-                num_ep = int(ep.get("episode_num"))
-                titulo_fmt = f"{nome_serie} - {temp_key}E{num_ep:02} - {ep.get('title')}"
-                resultados.append({
-                    "ID": str(id_serie),
-                    "Temporada": num_temp,
-                    "Episodio": str(num_ep),
-                    "Titulo_EP": titulo_fmt,
-                    "Capa_EP": url_banner(ep.get("info", {}).get("backdrop_path")),
-                    "Play": ep.get("id")
-                })
-
-        return jsonify(resultados)
-
-    except Exception as e:
-        return jsonify({"error": f"Erro ao listar episódios: {str(e)}"}), 500
-
-# === Categorias ===
-
+# === CATEGORIAS ===
 @app.route("/api/Venus/Categorias")
 def get_categorias():
-    data = get_api_data("get_vod_categories")
-    return jsonify(data)
+    return jsonify(get_api_data("get_vod_categories"))
 
-# === Unifica Filmes + Séries ===
-
+# === FILMES + SÉRIES NUMA LISTA ÚNICA (PAGINADO) ===
 @app.route("/api/VenusPlay")
 def all_conteudo():
-    page = int(request.args.get("page", 1))
-
-    filmes = get_api_data("get_vod_streams")
-    series = get_api_data("get_series")
+    page    = max(int(request.args.get("page", "1")), 1)
+    filmes  = get_api_data("get_vod_streams")
+    series  = get_api_data("get_series")
     if "error" in filmes or "error" in series:
-        return jsonify({"error": "Erro ao obter dados"}), 500
-
+        return jsonify({"error": "Erro ao obter dados"}), 502
     todos = [clean_item(i, "Filme") for i in filmes] + [clean_item(s, "Série") for s in series]
     todos.sort(key=lambda x: x["Título"] or "")
-    start = (page - 1) * PAGE_SIZE
-    end = start + PAGE_SIZE
-    return jsonify(todos[start:end])
+    i0, i1 = (page-1)*PAGE_SIZE, page*PAGE_SIZE
+    return jsonify(todos[i0:i1])
 
-# === Execução ===
-
+# === EXECUÇÃO ===
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # threaded=True para múltiplas requisições paralelas no servidor de desenvolvimento
+    app.run(host="0.0.0.0", port=5000, threaded=True)
