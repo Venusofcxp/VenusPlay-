@@ -178,17 +178,23 @@ def get_episodios():
             f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}",
             timeout=10
         )
-        episodes_dict = r.json().get("episodes", {})
+        data = r.json()
+        episodes_dict = data.get("episodes", {})
         episodes = []
 
-        # Busca tolerante: compara ignorando zeros à esquerda
-        for key in episodes_dict.keys():
-            if key == temporada or key.lstrip("0") == temporada.lstrip("0"):
+        # Match inteligente: aceita temporada = "1" e encontra "S01"
+        temporada_match = None
+        for key in episodes_dict:
+            if key.lower().lstrip("s").zfill(2) == temporada.zfill(2):
+                temporada_match = key
                 episodes = episodes_dict[key]
                 break
 
-    except:
-        return jsonify({"error": "Erro ao obter episódios"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Erro ao obter episódios: {str(e)}"}), 500
+
+    if not episodes:
+        return jsonify([])
 
     return jsonify([
         {
@@ -197,7 +203,7 @@ def get_episodios():
             "Titulo_EP": ep.get("title") or "",
             "Capa_EP": url_capa(ep.get("info", {}).get("movie_image")),
             "Play": ep.get("id"),
-            "Temporada": temporada
+            "Temporada": temporada_match or temporada
         }
         for ep in episodes
     ])
