@@ -138,82 +138,79 @@ def info_serie():
 
 # === Temporadas e Episódios ===
 
-@app.route("/api/Venus/Temporada")
-def get_temporadas():
-    id_ = request.args.get("id")
-    if not id_:
-        return jsonify({"error": "ID necessário"}), 400
-
+@app.route("/api/Venus/Temporadas")
+def listar_todas_as_temporadas():
+    resultados = []
     try:
-        resp = requests.get(
-            f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}",
-            timeout=10
-        )
-        data = resp.json()
-        info = data.get("info", {})          # <- pega informações da série
-        titulo_serie = limpar_titulo(info.get("name"))
-        seasons = data.get("episodes", {})   # dicionário {temporada: [episódios]}
-    except Exception:
-        return jsonify({"error": "Erro ao obter temporadas"}), 500
+        # 1. Pega a lista de séries disponíveis
+        series = get_api_data("get_series")      # [{series_id, name, ...}, ...]
 
-    # Agora cada item usa o título da série
-    return jsonify([
-        {
-            "ID": id_,
-            "Temporada": temp,
-            "Titulo": titulo_serie          # <- título correto da série
-        }
-        for temp in seasons.keys()
-    ])
+        for s in series:
+            id_serie = s.get("series_id")
+            nome_serie = limpar_titulo(s.get("name", ""))
 
-@app.route("/api/Venus/Série")
-def obter_episodio_serie():
-    id_serie = request.args.get("id")
-    temporada = request.args.get("Temporada")
-    episodio = request.args.get("Episódio")
+            # 2. Pega as temporadas dessa série
+            r = requests.get(
+                f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
+                f"&action=get_series_info&series_id={id_serie}", timeout=10
+            )
+            episodes_dict = r.json().get("episodes", {})  # {"S01": [...], "S02": [...]}
 
-    if not id_serie or not temporada or not episodio:
-        return jsonify({"error": "Parâmetros 'id', 'Temporada' e 'Episódio' são obrigatórios."}), 400
+            for temporada_key in episodes_dict.keys():     # ex. "S01"
+                num_temp = temporada_key.replace("S", "").lstrip("0") or "0"
+                resultados.append({
+                    "ID": str(id_serie),
+                    "Temporada": num_temp,
+                    "Titulo": nome_serie
+                })
 
-    try:
-        # Consulta dados da série
-        r = requests.get(
-            f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_serie}",
-            timeout=10
-        )
-        data = r.json()
-        info = data.get("info", {})
-        episodios_dict = data.get("episodes", {})
-
-        # Chave correta da temporada: S01, S02...
-        temporada_key = f"S{int(temporada):02}"
-
-        # Lista de episódios da temporada
-        episodios = episodios_dict.get(temporada_key, [])
-
-        # Procura o episódio desejado
-        for ep in episodios:
-            if str(ep.get("episode_num")) == str(episodio):
-                titulo_serie = limpar_titulo(info.get("name"))
-                temp_formatada = temporada_key  # já está como S01
-                ep_formatado = f"E{int(ep.get('episode_num')):02}"  # E01, E02...
-
-                titulo_completo = f"{titulo_serie} - {temp_formatada}{ep_formatado} - {ep.get('title')}"
-                return jsonify([
-                    {
-                        "ID": id_serie,
-                        "Episodio": ep.get("episode_num"),
-                        "Titulo_EP": titulo_completo,
-                        "Capa_EP": url_banner(ep.get("info", {}).get("backdrop_path")),
-                        "Play": ep.get("id"),
-                        "Temporada": temporada
-                    }
-                ])
-
-        return jsonify({"error": "Episódio não encontrado"}), 404
+        return jsonify(resultados)
 
     except Exception as e:
-        return jsonify({"error": f"Erro ao buscar episódio: {str(e)}"}), 500
+        return jsonify({"error": f"Erro ao listar temporadas: {str(e)}"}), 500
+
+@app.route("/api/Venus/Episodios")
+def listar_todos_os_episodios():
+    resultados = []
+    try:
+        # 1. Pega todas as séries
+        series = get_api_data("get_series")
+
+        for s in series:
+            id_serie = s.get("series_id")
+            nome_serie = limpar_titulo(s.get("name", ""))
+
+            # 2. Pega detalhes (inclui episódios)
+            r = requests.get(
+                f"{API_BASE}?username={USERNAME}&password={PASSWORD}"
+                f"&action=get_series_info&series_id={id_serie}", timeout=10
+            )
+            data = r.json()
+            episodes_dict = data.get("episodes", {})       # {"S01": [...], ...}
+
+            for temp_key, episodios in episodes_dict.items():
+                num_temp = temp_key.replace("S", "").lstrip("0") or "0"
+
+                for ep in episodios:
+                    num_ep = ep.get("episode_num")
+                    titulo_bruto = ep.get("title") or ""
+                    titulo_formatado = (
+                        f"{nome_serie} - {temp_key}E{int(num_ep):02} - {titulo_bruto}"
+                    )
+
+                    resultados.append({
+                        "ID": str(id_serie),
+                        "Episodio": str(num_ep),
+                        "Titulo_EP": titulo_formatado,
+                        "Capa_EP": url_banner(ep.get("info", {}).get("backdrop_path")),
+                        "Play": ep.get("id"),
+                        "Temporada": num_temp
+                    })
+
+        return jsonify(resultados)
+
+    except Exception as e:
+        return jsonify({"error": f"Erro ao listar episódios: {str(e)}"}), 500
 
 # === Categorias ===
 
