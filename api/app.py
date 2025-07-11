@@ -185,17 +185,20 @@ def obter_episodio_serie():
         info = data.get("info", {})
         episodios_dict = data.get("episodes", {})
 
-        # Formata chave da temporada (ex: "1" -> "S01")
+        # Chave correta da temporada: S01, S02...
         temporada_key = f"S{int(temporada):02}"
 
-        # Pega episódios da temporada desejada
+        # Lista de episódios da temporada
         episodios = episodios_dict.get(temporada_key, [])
 
-        # Procura o episódio pelo número
+        # Procura o episódio desejado
         for ep in episodios:
             if str(ep.get("episode_num")) == str(episodio):
                 titulo_serie = limpar_titulo(info.get("name"))
-                titulo_completo = f"{titulo_serie} - {temporada_key}E{ep.get('episode_num').zfill(2)} - {ep.get('title')}"
+                temp_formatada = temporada_key  # já está como S01
+                ep_formatado = f"E{int(ep.get('episode_num')):02}"  # E01, E02...
+
+                titulo_completo = f"{titulo_serie} - {temp_formatada}{ep_formatado} - {ep.get('title')}"
                 return jsonify([
                     {
                         "ID": id_serie,
