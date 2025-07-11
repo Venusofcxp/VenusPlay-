@@ -174,39 +174,42 @@ def get_episodios():
         return jsonify({"error": "ID e Temporada necessários"}), 400
 
     try:
+        # Pega info da série
         r = requests.get(
             f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}",
             timeout=10
         )
         data = r.json()
         episodes_dict = data.get("episodes", {})
-        episodes = []
 
-        # Match inteligente: aceita temporada = "1" e encontra "S01"
-        temporada_match = None
-        for key in episodes_dict:
-            if key.lower().lstrip("s").zfill(2) == temporada.zfill(2):
-                temporada_match = key
-                episodes = episodes_dict[key]
+        # Procura a chave correta (ex: "S01") comparando com o número informado
+        temporada_str = temporada.zfill(2)  # "1" -> "01"
+        key_certa = None
+        for k in episodes_dict.keys():
+            if k.lower().startswith("s") and k[1:].zfill(2) == temporada_str:
+                key_certa = k
                 break
+
+        if not key_certa:
+            return jsonify([])
+
+        episodios = episodes_dict.get(key_certa, [])
+
+        # Retorna os episódios dessa temporada
+        return jsonify([
+            {
+                "ID": ep.get("id"),
+                "Episodio": ep.get("episode_num"),
+                "Titulo_EP": ep.get("title") or "",
+                "Capa_EP": url_capa(ep.get("info", {}).get("movie_image")),
+                "Play": ep.get("id"),
+                "Temporada": key_certa
+            }
+            for ep in episodios
+        ])
 
     except Exception as e:
         return jsonify({"error": f"Erro ao obter episódios: {str(e)}"}), 500
-
-    if not episodes:
-        return jsonify([])
-
-    return jsonify([
-        {
-            "ID": ep.get("id"),
-            "Episodio": ep.get("episode_num"),
-            "Titulo_EP": ep.get("title") or "",
-            "Capa_EP": url_capa(ep.get("info", {}).get("movie_image")),
-            "Play": ep.get("id"),
-            "Temporada": temporada_match or temporada
-        }
-        for ep in episodes
-    ])
 
 # === Categorias ===
 
