@@ -166,50 +166,51 @@ def get_temporadas():
         for temp in seasons.keys()
     ])
 
-@app.route("/api/Venus/Episódio")
-def get_episodios():
-    id_ = request.args.get("id")
-    temporada = request.args.get("temporada")
-    if not id_ or not temporada:
-        return jsonify({"error": "ID e Temporada necessários"}), 400
+@app.route("/api/Venus/Série")
+def obter_episodio_serie():
+    id_serie = request.args.get("id")
+    temporada = request.args.get("Temporada")
+    episodio = request.args.get("Episódio")
+
+    if not id_serie or not temporada or not episodio:
+        return jsonify({"error": "Parâmetros 'id', 'Temporada' e 'Episódio' são obrigatórios."}), 400
 
     try:
-        # Pega info da série
+        # Consulta dados da série
         r = requests.get(
-            f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_}",
+            f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action=get_series_info&series_id={id_serie}",
             timeout=10
         )
         data = r.json()
-        episodes_dict = data.get("episodes", {})
+        info = data.get("info", {})
+        episodios_dict = data.get("episodes", {})
 
-        # Procura a chave correta (ex: "S01") comparando com o número informado
-        temporada_str = temporada.zfill(2)  # "1" -> "01"
-        key_certa = None
-        for k in episodes_dict.keys():
-            if k.lower().startswith("s") and k[1:].zfill(2) == temporada_str:
-                key_certa = k
-                break
+        # Formata chave da temporada (ex: "1" -> "S01")
+        temporada_key = f"S{int(temporada):02}"
 
-        if not key_certa:
-            return jsonify([])
+        # Pega episódios da temporada desejada
+        episodios = episodios_dict.get(temporada_key, [])
 
-        episodios = episodes_dict.get(key_certa, [])
+        # Procura o episódio pelo número
+        for ep in episodios:
+            if str(ep.get("episode_num")) == str(episodio):
+                titulo_serie = limpar_titulo(info.get("name"))
+                titulo_completo = f"{titulo_serie} - {temporada_key}E{ep.get('episode_num').zfill(2)} - {ep.get('title')}"
+                return jsonify([
+                    {
+                        "ID": id_serie,
+                        "Episodio": ep.get("episode_num"),
+                        "Titulo_EP": titulo_completo,
+                        "Capa_EP": url_banner(ep.get("info", {}).get("backdrop_path")),
+                        "Play": ep.get("id"),
+                        "Temporada": temporada
+                    }
+                ])
 
-        # Retorna os episódios dessa temporada
-        return jsonify([
-            {
-                "ID": ep.get("id"),
-                "Episodio": ep.get("episode_num"),
-                "Titulo_EP": ep.get("title") or "",
-                "Capa_EP": url_capa(ep.get("info", {}).get("movie_image")),
-                "Play": ep.get("id"),
-                "Temporada": key_certa
-            }
-            for ep in episodios
-        ])
+        return jsonify({"error": "Episódio não encontrado"}), 404
 
     except Exception as e:
-        return jsonify({"error": f"Erro ao obter episódios: {str(e)}"}), 500
+        return jsonify({"error": f"Erro ao buscar episódio: {str(e)}"}), 500
 
 # === Categorias ===
 
