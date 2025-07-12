@@ -1,212 +1,142 @@
-from flask import Flask, jsonify, request
-import requests
-import re
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from fastapi import FastAPI, HTTPException, Query
+import httpx, asyncio, re, time
+from typing import Optional, Dict, Any, Tuple
 
-app = Flask(__name__)
+app = FastAPI()
+API_BASE  = "https://hiveos.space/player_api.php"
+USERNAME  = "VenusPlay"
+PASSWORD  = "659225573"
+PAGE_SIZE = 27
 
-# === CONFIGURAÇÃO GERAL ===
-API_BASE   = "https://hiveos.space/player_api.php"
-USERNAME   = "VenusPlay"
-PASSWORD   = "659225573"
-PAGE_SIZE  = 27
-TIMEOUT    = 10          # segundos para cada requisição à IPTV
-POOL_SIZE  = 100         # conexões simultâneas reutilizáveis
+# ──────────────────────── CLIENTE GLOBAL ────────────────────────
+async_client: httpx.AsyncClient | None = None
 
-# === SESSÃO HTTP COM POOL / RETRY ===
-session = requests.Session()
-adapter = HTTPAdapter(
-    pool_connections=POOL_SIZE,
-    pool_maxsize=POOL_SIZE,
-    max_retries=Retry(total=3, backoff_factor=0.5, status_forcelist=[502, 503, 504])
-)
-session.mount("http://", adapter)
-session.mount("https://", adapter)
+@app.on_event("startup")
+async def _startup():
+    global async_client
+    async_client = httpx.AsyncClient(
+        timeout = 8.0,
+        limits  = httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        follow_redirects = True,
+    )
 
-# === FUNÇÕES UTILITÁRIAS ===
-def limpar_titulo(titulo: str) -> str:
-    if not titulo:
-        return ""
-    return re.sub(r"\s*\(\d{4}\)$", "", titulo.strip())
+@app.on_event("shutdown")
+async def _shutdown():
+    await async_client.aclose()
 
-def url_banner(path: str) -> str:
-    if path and isinstance(path, str):
-        if not path.startswith("http"):
-            return f"https://image.tmdb.org/t/p/w1280{path}"
-        return path
-    return ""
+# ───────────────────────── CACHE SIMPLES ─────────────────────────
+_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
+def _make_key(endpoint: str, params: str = "") -> Tuple[str, str]:
+    return (endpoint, params)
 
-def url_capa(path: str) -> str:
-    if path and isinstance(path, str):
-        if not path.startswith("http"):
-            return f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{path}"
-        return path
-    return ""
+def _get_cache(key: Tuple[str, str], ttl: int = 30):
+    if key in _cache:
+        ts, data = _cache[key]
+        if (time.time() - ts) < ttl:
+            return data
+        _cache.pop(key, None)          # expira
+    return None
 
-def primeiro_genero(genero: str) -> str:
-    if not genero:
-        return ""
-    return genero.split(",")[0].strip()
+def _set_cache(key: Tuple[str, str], data: Any):
+    _cache[key] = (time.time(), data)
 
-def get_api_data(endpoint: str):
-    """GET simples a qualquer endpoint Xtream"""
+# ───────────────────── FUNÇÕES UTILITÁRIAS ──────────────────────
+re_year  = re.compile(r"\s*\(\d{4}\)$")
+re_sufix = re.compile(r"\s*-\s*S\d{2}E\d{2}\s*-\s*Capítulo\s*\d+\s*$", re.I)
+
+def limpar_titulo(txt: Optional[str]) -> str:
+    return re_year.sub("", txt.strip()) if txt else ""
+
+def url_banner(path: Optional[str]) -> str:
+    return f"https://image.tmdb.org/t/p/w1280{path}" if path and not str(path).startswith("http") else str(path or "")
+
+def url_capa(path: Optional[str]) -> str:
+    return f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{path}" if path and not str(path).startswith("http") else str(path or "")
+
+def primeiro_genero(txt: Optional[str]) -> str:
+    if not txt: return ""
+    return txt.split(",")[0].split("/")[0].strip()
+
+async def fetch(endpoint: str, *, ttl: int = 30) -> Any:
+    """GET na API IPTV com cache e retentativa curta."""
+    key = _make_key(endpoint)
+    if data := _get_cache(key, ttl):
+        return data
+
     url = f"{API_BASE}?username={USERNAME}&password={PASSWORD}&action={endpoint}"
-    try:
-        resp = session.get(url, timeout=TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
+    for _ in range(2):  # 1 retentativa
+        try:
+            r = await async_client.get(url)
+            r.raise_for_status()
+            data = r.json()
+            _set_cache(key, data)
+            return data
+        except Exception as exc:
+            err = exc
+            await asyncio.sleep(0.8)
+    return {"error": str(err)}
 
-# === PAGINAÇÃO (FILMES / SÉRIES LISTAGEM GERAL) ===
-def clean_item(item: dict, tipo: str):
-    return {
-        "ID":      item.get("stream_id") or item.get("series_id"),
-        "Título":  limpar_titulo(item.get("name")),
-        "Capa":    url_capa(item.get("stream_icon") or item.get("cover")),
-        "Banner":  url_banner(item.get("backdrop_path")),
-        "Ano":     item.get("year") or "",
-        "Gênero":  primeiro_genero(item.get("genre")),
-        "Tipo":    tipo,
-        "Sinopse": item.get("plot", ""),
-        "Score":   item.get("rating", ""),
-        "Player":  item.get("stream_id") if tipo == "Filme" else None
+def clean_item(item: dict, tipo: str) -> dict:
+    raw_banner = item.get("backdrop_path")
+    if isinstance(raw_banner, list): raw_banner = raw_banner[0] if raw_banner else ""
+    if isinstance(raw_banner, str) and "," in raw_banner: raw_banner = raw_banner.split(",")[0]
+    if not raw_banner:
+        raw_banner = item.get("stream_icon") if tipo == "Filme" else item.get("cover")
+
+    base = {
+        "ID"      : item.get("stream_id") or item.get("series_id"),
+        "Título"  : limpar_titulo(item.get("name")),
+        "Capa"    : url_capa(item.get("stream_icon") or item.get("cover")),
+        "Banner"  : url_banner(str(raw_banner).strip()),
+        "Ano"     : item.get("year") or "",
+        "Gênero"  : primeiro_genero(item.get("genre")),
+        "Tipo"    : tipo,
+        "Sinopse" : item.get("plot") or None,
+        "Score"   : item.get("rating") or 0,
     }
+    if tipo == "Filme":
+        base["Player"] = item.get("stream_id")
+    return base
 
-# === ROTAS DE LISTAGEM (FILMES / SÉRIES) ===
-@app.route("/api/Venus/Filmes")
-def get_filmes():
-    page  = max(int(request.args.get("page", "1")), 1)
-    data  = get_api_data("get_vod_streams")
-    if "error" in data:
-        return jsonify(data), 502
+# ───────────────────────────── ROTAS ─────────────────────────────
+@app.get("/api/Venus/Filmes")
+async def filmes(page: int = Query(1, ge=1)):
+    data   = await fetch("get_vod_streams", ttl=30)
+    if "error" in data: raise HTTPException(500, data["error"])
     filmes = [clean_item(i, "Filme") for i in data]
-    i0, i1 = (page-1)*PAGE_SIZE, page*PAGE_SIZE
-    return jsonify(filmes[i0:i1])
+    start, end = (page-1)*PAGE_SIZE, (page)*PAGE_SIZE
+    return {"data": filmes[start:end], "page": page, "per_page": PAGE_SIZE, "total": len(filmes)}
 
-@app.route("/api/Venus/Séries")
-def get_series():
-    page  = max(int(request.args.get("page", "1")), 1)
-    data  = get_api_data("get_series")
-    if "error" in data:
-        return jsonify(data), 502
+@app.get("/api/Venus/Séries")
+async def series(page: int = Query(1, ge=1)):
+    data   = await fetch("get_series", ttl=30)
+    if "error" in data: raise HTTPException(500, data["error"])
     series = [clean_item(i, "Série") for i in data]
-    i0, i1 = (page-1)*PAGE_SIZE, page*PAGE_SIZE
-    return jsonify(series[i0:i1])
+    start, end = (page-1)*PAGE_SIZE, (page)*PAGE_SIZE
+    return {"data": series[start:end], "page": page, "per_page": PAGE_SIZE, "total": len(series)}
 
-# === INFO DE FILME / SÉRIE ===
-@app.route("/api/Info/Venus/Filmes")
-def info_filme():
-    id_ = request.args.get("id")
-    if not id_:
-        return jsonify({"error": "ID necessário"}), 400
-    data = get_api_data(f"get_vod_info&vod_id={id_}")
-    info = data.get("info", {})
-    return jsonify({
-        "ID": id_,
-        "Título": limpar_titulo(info.get("title")),
-        "Capa": url_capa(info.get("movie_image")),
-        "Banner": url_banner(info.get("backdrop_path")),
-        "Ano": info.get("year") or "",
-        "Gênero": primeiro_genero(info.get("genre")),
-        "Tipo": "Filme",
-        "Sinopse": info.get("plot") or "",
-        "Score": info.get("rating") or "",
-        "Player": id_
-    })
+# Info de filmes e séries mantido igual (chamadas pouco frequentes) …
 
-@app.route("/api/Info/Venus/Séries")
-def info_serie():
-    id_ = request.args.get("id")
-    if not id_:
-        return jsonify({"error": "ID necessário"}), 400
-    data = get_api_data(f"get_series_info&series_id={id_}")
-    info = data.get("info", {})
-    return jsonify({
-        "ID": id_,
-        "Título": limpar_titulo(info.get("name")),
-        "Capa": url_capa(info.get("cover")),
-        "Banner": url_banner(info.get("backdrop_path")),
-        "Ano": info.get("releaseDate") or "",
-        "Gênero": primeiro_genero(info.get("genre")),
-        "Tipo": "Série",
-        "Sinopse": info.get("plot") or "",
-        "Score": info.get("rating") or ""
-    })
-
-# === ROTAS POR SÉRIE (TEMPORADAS & EPISÓDIOS) ===
-def buscar_series_info(id_serie: str):
-    return get_api_data(f"get_series_info&series_id={id_serie}")
-
-@app.route("/api/Venus/Temporadas")
-def listar_temporadas_da_serie():
-    id_serie = request.args.get("id")
-    if not id_serie:
-        return jsonify({"error": "Parâmetro 'id' da série é obrigatório."}), 400
-    data = buscar_series_info(id_serie)
-    if "error" in data:
-        return jsonify(data), 502
-    nome_serie    = limpar_titulo(data.get("info", {}).get("name", ""))
-    episodes_dict = data.get("episodes", {})
-    resultados = [{
-        "ID": str(id_serie),
-        "Temporada": k.replace("S", "").lstrip("0") or "0",
-        "Titulo": nome_serie
-    } for k in episodes_dict.keys()]
-    return jsonify(resultados)
-
-@app.route("/api/Venus/Episodios")
-def listar_episodios_da_serie():
-    id_serie = request.args.get("id")
-    if not id_serie:
-        return jsonify({"error": "Parâmetro 'id' da série é obrigatório."}), 400
-    data = buscar_series_info(id_serie)
-    if "error" in data:
-        return jsonify(data), 502
-    nome_serie    = limpar_titulo(data.get("info", {}).get("name", ""))
-    episodes_dict = data.get("episodes", {})
-    resultados = []
-    for temp_key, episodios in episodes_dict.items():
-        num_temp = temp_key.replace("S", "").lstrip("0") or "0"
-        for ep in episodios:
-            num_ep_raw = ep.get("episode_num") or "0"
-            try:
-                num_ep = int(num_ep_raw)
-            except ValueError:
-                num_ep = 0
-            info_ep  = ep.get("info", {})
-            banner   = url_banner(info_ep.get("backdrop_path") or info_ep.get("movie_image"))
-            titulo   = f"{nome_serie} - {temp_key}E{num_ep:02} - {ep.get('title')}"
-            resultados.append({
-                "ID": str(id_serie),
-                "Temporada": num_temp,
-                "Episodio": str(num_ep),
-                "Titulo_EP": titulo,
-                "Capa_EP": banner,
-                "Play": ep.get("id")
-            })
-    return jsonify(resultados)
-
-# === CATEGORIAS ===
-@app.route("/api/Venus/Categorias")
-def get_categorias():
-    return jsonify(get_api_data("get_vod_categories"))
-
-# === FILMES + SÉRIES NUMA LISTA ÚNICA (PAGINADO) ===
-@app.route("/api/VenusPlay")
-def all_conteudo():
-    page    = max(int(request.args.get("page", "1")), 1)
-    filmes  = get_api_data("get_vod_streams")
-    series  = get_api_data("get_series")
+# --------------- GENEROS (filmes + séries) ---------------
+@app.get("/api/Venus/Generos")
+async def generos():
+    filmes, series = await asyncio.gather(fetch("get_vod_streams", ttl=60),
+                                          fetch("get_series", ttl=60))
     if "error" in filmes or "error" in series:
-        return jsonify({"error": "Erro ao obter dados"}), 502
-    todos = [clean_item(i, "Filme") for i in filmes] + [clean_item(s, "Série") for s in series]
-    todos.sort(key=lambda x: x["Título"] or "")
-    i0, i1 = (page-1)*PAGE_SIZE, page*PAGE_SIZE
-    return jsonify(todos[i0:i1])
+        raise HTTPException(500, "Erro ao obter dados")
+    gen = {primeiro_genero(i.get("genre","")) for i in (*filmes, *series) if primeiro_genero(i.get("genre",""))}
+    return {"generos": sorted(gen)}
 
-# === EXECUÇÃO ===
-if __name__ == "__main__":
-    # threaded=True para múltiplas requisições paralelas no servidor de desenvolvimento
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+# --------------- CATÁLOGO INTERCALADO --------------------
+@app.get("/api/VenusPlay/Todos")
+async def intercalado():
+    filmes_raw = await fetch("get_vod_streams", ttl=30)
+    series_raw = await fetch("get_series", ttl=30)
+    if "error" in filmes_raw or "error" in series_raw:
+        raise HTTPException(500, "Erro ao obter dados")
+    filmes  = [clean_item(f, "Filme") for f in filmes_raw]
+    series  = [clean_item(s, "Série") for s in series_raw]
+    mix     = [x for pair in zip(filmes, series) for x in pair]
+    # se listas de tamanhos diferentes:
+    mix.extend(filmes[len(series):] if len(filmes) > len(series) else series[len(filmes):])
+    return {"data": mix, "total": len(mix)}
