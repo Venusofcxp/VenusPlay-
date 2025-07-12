@@ -1,0 +1,17 @@
+[Unit]
+Description=Venus FastAPI
+After=network.target
+
+[Service]
+User=api
+Group=api
+WorkingDirectory=/home/VenusPlay-/api_venus-play
+EnvironmentFile=/home/VenusPlay-/api_venus-play/.env
+ExecStart=/home/VenusPlay-/api_venus-play/.venv/bin/gunicorn \
+          api:app --workers 4 --worker-class uvicorn.workers.UvicornWorker \
+          --bind 127.0.0.1:8000 --timeout 30 --keep-alive 5 --log-level info
+Restart=always
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
